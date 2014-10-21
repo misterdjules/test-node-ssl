@@ -12,54 +12,170 @@ var common = require('./common');
 
 var SSL2_COMPATIBLE_CIPHERS = 'RC4-MD5';
 
-var CMD_LINE_OPTIONS = [null, "--enable-ssl2", "--enable-ssl3"];
-var SECURE_PROTOCOLS = [null, 'SSLv2_method', 'SSLv3_method'];
+var CMD_LINE_OPTIONS = [ null, "--enable-ssl2", "--enable-ssl3" ];
+
+var SERVER_SSL_PROTOCOLS = [
+  null,
+  'SSLv2_method', 'SSLv2_server_method',
+  'SSLv3_method', 'SSLv3_server_method',
+  'TLSv1_method', 'TLSv1_server_method',
+  'SSLv23_method','SSLv23_server_method'
+];
+
+var CLIENT_SSL_PROTOCOLS = [
+  null,
+  'SSLv2_method', 'SSLv2_client_method',
+  'SSLv3_method', 'SSLv3_client_method',
+  'TLSv1_method', 'TLSv1_client_method',
+  'SSLv23_method','SSLv23_client_method'
+];
+
+var SECURE_OPTIONS = [
+  null,
+  0,
+  constants.SSL_OP_NO_SSLv2,
+  constants.SSL_OP_NO_SSLv3,
+  constants.SSL_OP_NO_SSLv2 | constants.SSL_OP_NO_SSLv3
+];
+
+function xtend(source) {
+  var clone = {};
+
+  for (var property in source) {
+    if (source.hasOwnProperty(property)) {
+      clone[property] = source[property];
+    }
+  }
+
+  return clone;
+}
+
+function isAutoNegotiationProtocol(sslProtocol) {
+  assert(sslProtocol === null || typeof sslProtocol === 'string');
+
+  return  sslProtocol == null ||
+          sslProtocol === 'SSLv23_method' ||
+          sslProtocol === 'SSLv23_client_method' ||
+          sslProtocol === 'SSLv23_server_method';
+}
+
+function isSameSslProtocolVersion(serverSecureProtocol, clientSecureProtocol) {
+  assert(serverSecureProtocol === null || typeof serverSecureProtocol === 'string');
+  assert(clientSecureProtocol === null || typeof clientSecureProtocol === 'string');
+
+  if (serverSecureProtocol === clientSecureProtocol) {
+    return true;
+  }
+
+  var serverProtocolPrefix = '';
+  if (serverSecureProtocol)
+    serverProtocolPrefix = serverSecureProtocol.split('_')[0];
+
+  var clientProtocolPrefix = '';
+  if (clientSecureProtocol)
+    clientProtocolPrefix = clientSecureProtocol.split('_')[0];
+
+  if (serverProtocolPrefix === clientProtocolPrefix) {
+    return true;
+  }
+
+  return false;
+}
+
+function secureProtocolsCompatible(serverSecureProtocol, clientSecureProtocol) {
+  if (isAutoNegotiationProtocol(serverSecureProtocol) ||
+      isAutoNegotiationProtocol(clientSecureProtocol)) {
+    return true;
+  }
+
+  if (isSameSslProtocolVersion(serverSecureProtocol,
+                               clientSecureProtocol)) {
+    return true;
+  }
+
+  return false;
+}
+
+function isSsl3Protocol(secureProtocol) {
+  assert(secureProtocol === null || typeof secureProtocol === 'string');
+
+  return secureProtocol === 'SSLv3_method' ||
+         secureProtocol === 'SSLv3_client_method' ||
+         secureProtocol === 'SSLv3_server_method';
+}
+
+function isSsl2Protocol(secureProtocol) {
+  assert(secureProtocol === null || typeof secureProtocol === 'string');
+
+  return secureProtocol === 'SSLv2_method' ||
+         secureProtocol === 'SSLv2_client_method' ||
+         secureProtocol === 'SSLv2_server_method';
+}
+
+function secureProtocolCompatibleWithSecureOptions(secureProtocol, secureOptions, cmdLineOption) {
+  if (secureOptions == null) {
+    if (isSsl2Protocol(secureProtocol) &&
+        (!cmdLineOption || cmdLineOption.indexOf('--enable-ssl2') === -1)) {
+      return false;
+    }
+
+    if (isSsl3Protocol(secureProtocol) &&
+        (!cmdLineOption || cmdLineOption.indexOf('--enable-ssl3') === -1)) {
+      return false;
+    }
+  } else {
+    if (secureOptions & constants.SSL_OP_NO_SSLv2 && isSsl2Protocol(secureProtocol)) {
+      return false;
+    }
+
+    if (secureOptions & constants.SSL_OP_NO_SSLv3 && isSsl3Protocol(secureProtocol)) {
+      return false;
+    }
+  }
+
+  return true;
+}
 
 function testSetupsCompatible(serverSetup, clientSetup) {
-
-  if (serverSetup.secureProtocol &&
-      SECURE_PROTOCOLS.indexOf(serverSetup.secureProtocol) !==
-      CMD_LINE_OPTIONS.indexOf(serverSetup.cmdLine)) {
-    // A secureProtocol that is incompatible with command line options had been mentioned,
-    // the connection between client an server will fail for sure.
+  if (!secureProtocolsCompatible(serverSetup.secureProtocol,
+                                 clientSetup.secureProtocol)) {
+    debug('secureProtocols not compatible! server secureProtocol: ' +
+          serverSetup.secureProtocol + ', client secureProtocol: ' +
+          clientSetup.secureProtocol);
     return false;
   }
 
-  if (clientSetup.secureProtocol &&
-      SECURE_PROTOCOLS.indexOf(clientSetup.secureProtocol) !==
-      CMD_LINE_OPTIONS.indexOf(clientSetup.cmdLine)) {
-    // A secureProtocol that is incompatible with command line options had been mentioned,
-    // the connection between client an server will fail for sure.
+  if (!secureProtocolCompatibleWithSecureOptions(serverSetup.secureProtocol,
+                                                 clientSetup.secureOptions,
+                                                 clientSetup.cmdLineOption) ||
+      !secureProtocolCompatibleWithSecureOptions(clientSetup.secureProtocol,
+                                                 serverSetup.secureOptions,
+                                                 serverSetup.cmdLineOption)) {
+    debug('Secure protocol not compatible with secure options!');
     return false;
   }
 
-  if ((serverSetup.secureProtocol && clientSetup.secureProtocol) &&
-      (serverSetup.secureProtocol !== clientSetup.secureProtocol)) {
-    // The server and/or the client explicitely set a protocol, but they are not compatible,
-    // the connection will fail for sure
-    return false;
-  }
-
-  if (clientSetup.secureProtocol &&
-    CMD_LINE_OPTIONS.indexOf(serverSetup.cmdLine) !==
-    SECURE_PROTOCOLS.indexOf(clientSetup.secureProtocol)) {
-    // The client specifies a secure protocol that is not enabled by the server,
-    // the connection will fail for sure
-    return false;
-  }
-
-  if (serverSetup.secureProtocol &&
-    CMD_LINE_OPTIONS.indexOf(clientSetup.cmdLine) !==
-    SECURE_PROTOCOLS.indexOf(serverSetup.secureProtocol)) {
-    // The server specifies a secure protocol that is not enabled by the client,
-    // the connection will fail for sure
-    return false;
-  }
-
-  if (((clientSetup.secureProtocol === 'SSLv2_method' && serverSetup.secureProtocol === null) ||
-      (clientSetup.secureProtocol === null && serverSetup.secureProtocol === 'SSLv2_method')) &&
+  if ((isSsl2Protocol(serverSetup.secureProtocol) || isSsl2Protocol(clientSetup.secureProtocol)) &&
       (clientSetup.ciphers !== SSL2_COMPATIBLE_CIPHERS || serverSetup.ciphers !== SSL2_COMPATIBLE_CIPHERS)) {
     return false;
+  }
+
+  return true;
+}
+
+function sslSetupMakesSense(cmdLineOption, secureProtocol, secureOption) {
+  if (isSsl2Protocol(secureProtocol)) {
+    if (secureOption & constants.SSL_OP_NO_SSLv2 ||
+        (!cmdLineOption || cmdLineOption.indexOf('--enable-ssl2') === -1)) {
+      return false;
+    }
+  }
+
+  if (isSsl3Protocol(secureProtocol)) {
+    if (secureOption & constants.SSL_OP_NO_SSLv3 ||
+        (!cmdLineOption || cmdLineOption.indexOf('--enable-ssl3') === -1)) {
+      return false;
+    }
   }
 
   return true;
@@ -71,18 +187,45 @@ function createTestsSetups() {
   var clientsSetup = [];
 
   CMD_LINE_OPTIONS.forEach(function (cmdLineOption) {
-    SECURE_PROTOCOLS.forEach(function (secureProtocol) {
+    SERVER_SSL_PROTOCOLS.forEach(function (serverSecureProtocol) {
+      SECURE_OPTIONS.forEach(function (secureOption) {
+        if (sslSetupMakesSense(cmdLineOption, serverSecureProtocol, secureOption)) {
+          var serverSetup = {
+            cmdLine: cmdLineOption,
+            secureProtocol: serverSecureProtocol,
+            secureOptions: secureOption
+          };
 
-      var serverSetup = {cmdLine: cmdLineOption, secureProtocol: secureProtocol};
-      if (secureProtocol === 'SSLv2_method') {
-        // Specific ciphers compatible with SSLv2 are needed, default ciphers
-        // are not compatible with SSLv2
-        serverSetup.ciphers = SSL2_COMPATIBLE_CIPHERS;
-      }
-      serversSetup.push(serverSetup);
+          serversSetup.push(serverSetup);
 
-      clientsSetup.push({cmdLine: cmdLineOption, secureProtocol: secureProtocol});
-    })
+          if (isSsl2Protocol(serverSecureProtocol)) {
+            var setupWithSsl2Ciphers = xtend(serverSetup);
+            setupWithSsl2Ciphers.ciphers = SSL2_COMPATIBLE_CIPHERS;
+            serversSetup.push(setupWithSsl2Ciphers);
+          }
+        }
+      });
+    });
+
+    CLIENT_SSL_PROTOCOLS.forEach(function (clientSecureProtocol) {
+      SECURE_OPTIONS.forEach(function (secureOption) {
+        if (sslSetupMakesSense(cmdLineOption, clientSecureProtocol, secureOption)) {
+          var clientSetup = {
+            cmdLine: cmdLineOption,
+            secureProtocol: clientSecureProtocol,
+            secureOptions: secureOption
+          };
+
+          clientsSetup.push(clientSetup);
+
+          if (isSsl2Protocol(clientSecureProtocol)) {
+            var setupWithSsl2Ciphers = xtend(clientSetup);
+            setupWithSsl2Ciphers.ciphers = SSL2_COMPATIBLE_CIPHERS;
+            clientsSetup.push(setupWithSsl2Ciphers);
+          }
+        }
+      });
+    });
   });
 
   var testSetups = [];
@@ -103,8 +246,11 @@ function createTestsSetups() {
   return testSetups;
 }
 
-function runServer(secureProtocol, ciphers) {
+function runServer(secureProtocol, secureOptions, ciphers) {
   debug('Running server!');
+  debug('secureProtocol: ' + secureProtocol);
+  debug('secureOptions: ' + secureOptions);
+  debug('ciphers: ' + ciphers);
 
   var keyPath = path.join(common.fixturesDir, 'agent.key');
   var certPath = path.join(common.fixturesDir, 'agent.crt');
@@ -112,12 +258,13 @@ function runServer(secureProtocol, ciphers) {
   var key = fs.readFileSync(keyPath).toString();
   var cert = fs.readFileSync(certPath).toString();
 
-  var server = tls.Server({ key: key,
-                            cert: cert,
-                            ca: [],
-                            ciphers: ciphers,
-                            secureProtocol: secureProtocol
-                          });
+  var server = new tls.Server({ key: key,
+                                cert: cert,
+                                ca: [],
+                                ciphers: ciphers,
+                                secureProtocol: secureProtocol,
+                                secureOptions: secureOptions
+                              });
 
   server.listen(common.PORT, function() {
     process.on('message', function onChildMsg(msg) {
@@ -141,20 +288,26 @@ function runServer(secureProtocol, ciphers) {
   });
 }
 
-function runClient(secureProtocol) {
+function runClient(secureProtocol, secureOptions, ciphers) {
   debug('Running client!');
+  debug('secureProtocol: ' + secureProtocol);
+  debug('secureOptions: ' + secureOptions);
+  debug('ciphers: ' + ciphers);
 
   var con = tls.connect(common.PORT,
                         {
                           rejectUnauthorized: false,
-                          secureProtocol: secureProtocol
+                          secureProtocol: secureProtocol,
+                          secureOptions: secureOptions
                         },
                         function() {
 
     // TODO jgilli: test that sslProtocolUsed is at least as "secure" as
     // "secureProtocol"
-    var sslProtocolUsed = con.getVersion();
-    debug('Protocol used: ' + sslProtocolUsed);
+    /*
+     * var sslProtocolUsed = con.getVersion();
+     * debug('Protocol used: ' + sslProtocolUsed);
+     */
 
     process.send('client_done');
   });
@@ -163,6 +316,29 @@ function runClient(secureProtocol) {
     debug('Client could not connect:' + err);
     process.exit(1);
   });
+}
+
+function stringToSecureOptions(secureOptionsString) {
+  assert(typeof secureOptionsString === 'string');
+
+  var secureOptions;
+
+  var optionStrings = secureOptionsString.split('|');
+  optionStrings.forEach(function (option) {
+    if (option === 'SSL_OP_NO_SSLv2') {
+      secureOptions |= constants.SSL_OP_NO_SSLv2;
+    }
+
+    if (option === 'SSL_OP_NO_SSLv3') {
+      secureOptions |= constants.SSL_OP_NO_SSLv3;
+    }
+
+    if (option === '0') {
+      secureOptions = 0;
+    }
+  });
+
+  return secureOptions;
 }
 
 function processSslOptions(argv){
@@ -178,8 +354,12 @@ function processSslOptions(argv){
     var keyValue = arg.split(':');
     var key = keyValue[0];
 
-    if (keyValue.length == 2) {
+    if (keyValue.length == 2 && typeof keyValue[1] === 'string' && keyValue[1].length > 0) {
       value = keyValue[1];
+
+      if (key === 'secureOptions') {
+        value = stringToSecureOptions(value);
+      }
     }
 
     options[key] = value;
@@ -200,6 +380,24 @@ function checkTestExitCode(testSetup, serverExitCode, clientExitCode) {
   }
 }
 
+function secureOptionsToString(secureOptions) {
+  var secureOptsString = '';
+
+  if (secureOptions & constants.SSL_OP_NO_SSLv2) {
+    secureOptsString += 'SSL_OP_NO_SSLv2';
+  }
+
+  if (secureOptions & constants.SSL_OP_NO_SSLv3) {
+    secureOptsString += '|SSL_OP_NO_SSLv3';
+  }
+
+  if (secureOptions === 0) {
+    secureOptsString = '0';
+  }
+
+  return secureOptsString;
+}
+
 function forkTestProcess(processType, testSetup) {
   var argv = [ processType ];
 
@@ -208,6 +406,8 @@ function forkTestProcess(processType, testSetup) {
   } else {
     argv.push('secureProtocol:');
   }
+
+  argv.push('secureOptions:' + secureOptionsToString(testSetup.secureOptions));
 
   if (testSetup.ciphers) {
     argv.push('ciphers:' + testSetup.ciphers);
@@ -230,12 +430,18 @@ function forkTestProcess(processType, testSetup) {
 var agentType = process.argv[2];
 if (agentType === 'client' || agentType === 'server') {
   var sslOptions = processSslOptions(process.argv);
+  debug('secureProtocol: ' + sslOptions.secureProtocol);
+  debug('secureOptions: ' + sslOptions.secureOptions);
+  debug('ciphers:' + sslOptions.ciphers);
 
   if (agentType === 'client') {
-    runClient(sslOptions.secureProtocol);
+    runClient(sslOptions.secureProtocol,
+              sslOptions.secureOptions,
+              sslOptions.ciphers);
   } else if (agentType === 'server') {
-    debug('ciphers:' + sslOptions.ciphers);
-    runServer(sslOptions.secureProtocol, sslOptions.ciphers);
+    runServer(sslOptions.secureProtocol,
+              sslOptions.secureOptions,
+              sslOptions.ciphers);
   }
 } else {
   /*
