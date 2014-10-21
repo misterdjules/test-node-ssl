@@ -246,8 +246,9 @@ function createTestsSetups() {
   return testSetups;
 }
 
-function runServer(secureProtocol, secureOptions, ciphers) {
+function runServer(port, secureProtocol, secureOptions, ciphers) {
   debug('Running server!');
+  debug('port: ' + port);
   debug('secureProtocol: ' + secureProtocol);
   debug('secureOptions: ' + secureOptions);
   debug('ciphers: ' + ciphers);
@@ -266,7 +267,7 @@ function runServer(secureProtocol, secureOptions, ciphers) {
                                 secureOptions: secureOptions
                               });
 
-  server.listen(common.PORT, function() {
+  server.listen(port, function() {
     process.on('message', function onChildMsg(msg) {
       if (msg === 'close') {
         server.close();
@@ -288,13 +289,14 @@ function runServer(secureProtocol, secureOptions, ciphers) {
   });
 }
 
-function runClient(secureProtocol, secureOptions, ciphers) {
+function runClient(port, secureProtocol, secureOptions, ciphers) {
   debug('Running client!');
+  debug('port: ' + port);
   debug('secureProtocol: ' + secureProtocol);
   debug('secureOptions: ' + secureOptions);
   debug('ciphers: ' + ciphers);
 
-  var con = tls.connect(common.PORT,
+  var con = tls.connect(port,
                         {
                           rejectUnauthorized: false,
                           secureProtocol: secureProtocol,
@@ -341,11 +343,8 @@ function stringToSecureOptions(secureOptionsString) {
   return secureOptions;
 }
 
-function processSslOptions(argv){
-  var options = {
-    secureProtocol: null,
-    ciphers: null
-  };
+function processTestCmdLineOptions(argv){
+  var options = {};
 
   argv.forEach(function (arg) {
     var key;
@@ -354,11 +353,15 @@ function processSslOptions(argv){
     var keyValue = arg.split(':');
     var key = keyValue[0];
 
-    if (keyValue.length == 2 && typeof keyValue[1] === 'string' && keyValue[1].length > 0) {
+    if (keyValue.length == 2 && keyValue[1].length > 0) {
       value = keyValue[1];
 
       if (key === 'secureOptions') {
         value = stringToSecureOptions(value);
+      }
+
+      if (key === 'port') {
+        value = +value;
       }
     }
 
@@ -415,6 +418,8 @@ function forkTestProcess(processType, testSetup) {
     argv.push('ciphers:');
   }
 
+  argv.push('port:' + (testSetup.port ? testSetup.port : common.PORT));
+
   var forkOptions;
   if (testSetup.cmdLine) {
     forkOptions = {
@@ -427,23 +432,138 @@ function forkTestProcess(processType, testSetup) {
               forkOptions);
 }
 
+function runTest(testSetup, testDone) {
+  var clientSetup = testSetup.client;
+  var serverSetup = testSetup.server;
+
+  if (clientSetup && serverSetup) {
+    debug('Starting new test on port: ' + testSetup.port);
+    clientSetup.port = testSetup.port;
+    serverSetup.port = testSetup.port;
+
+    debug('client setup:');
+    debug(clientSetup);
+
+    debug('server setup:');
+    debug(serverSetup);
+
+    debug('Success expected:' + testSetup.successExpected);
+
+    var serverExitCode;
+
+    var clientStarted = false;
+    var clientExitCode;
+
+    var serverChild = forkTestProcess('server', serverSetup);
+    assert(serverChild);
+
+    serverChild.on('message', function onServerMsg(msg) {
+      if (msg === 'server_listening') {
+        debug('Starting client!');
+        clientStarted = true;
+
+        var clientChild = forkTestProcess('client', clientSetup);
+        assert(clientChild);
+
+        clientChild.on('exit', function onClientExited(exitCode) {
+          debug('Client exited with code:' + exitCode);
+
+          clientExitCode = exitCode;
+          if (serverExitCode != null) {
+            checkTestExitCode(testSetup, serverExitCode, clientExitCode)
+            return testDone();
+          } else {
+            if (serverChild.connected) {
+              serverChild.send('close');
+            }
+          }
+        });
+
+        clientChild.on('message', function onClientMsg(msg) {
+          if (msg === 'client_done' && serverChild.connected) {
+            serverChild.send('close');
+          }
+        })
+      }
+    });
+
+    serverChild.on('exit', function onServerExited(exitCode) {
+      debug('Server exited with code:' + exitCode);
+
+      serverExitCode = exitCode;
+      if (clientExitCode != null || !clientStarted) {
+        checkTestExitCode(testSetup, serverExitCode, clientExitCode);
+        return testDone();
+      }
+    });
+
+  }
+}
+
+function usage() {
+  console.log('Usage: test-node-ssl [-j N]');
+  process.exit(1);
+}
+
+function processDriverCmdLineOptions(argv) {
+  var options = {
+    parallelTests: 1
+  };
+
+  for (var i = 1; i < argv.length; ++i) {
+    if (argv[i] === '-j') {
+
+      var nbParallelTests = +argv[i + 1];
+      if (!nbParallelTests) {
+        usage();
+      } else {
+        options.parallelTests = argv[++i];
+      }
+    }
+
+    if (argv[i] === '-s') {
+      var start = +argv[i + 1];
+      if (!start) {
+        usage();
+      } else {
+        options.start = argv[++i];
+      }
+    }
+
+    if (argv[i] === 'e') {
+      var end = +argv[i + 1];
+      if (!end) {
+        usage();
+      } else {
+        options.end = argv[++i];
+      }
+    }
+  }
+
+  return options;
+}
+
 var agentType = process.argv[2];
 if (agentType === 'client' || agentType === 'server') {
-  var sslOptions = processSslOptions(process.argv);
-  debug('secureProtocol: ' + sslOptions.secureProtocol);
-  debug('secureOptions: ' + sslOptions.secureOptions);
-  debug('ciphers:' + sslOptions.ciphers);
+  var options = processTestCmdLineOptions(process.argv);
+  debug('secureProtocol: ' + options.secureProtocol);
+  debug('secureOptions: ' + options.secureOptions);
+  debug('ciphers:' + options.ciphers);
+  debug('port:' + options.port);
 
   if (agentType === 'client') {
-    runClient(sslOptions.secureProtocol,
-              sslOptions.secureOptions,
-              sslOptions.ciphers);
+    runClient(options.port,
+              options.secureProtocol,
+              options.secureOptions,
+              options.ciphers);
   } else if (agentType === 'server') {
-    runServer(sslOptions.secureProtocol,
-              sslOptions.secureOptions,
-              sslOptions.ciphers);
+    runServer(options.port,
+              options.secureProtocol,
+              options.secureOptions,
+              options.ciphers);
   }
 } else {
+  var driverOptions = processDriverCmdLineOptions(process.argv);
   /*
    * This is the tests driver process.
    *
@@ -457,75 +577,42 @@ if (agentType === 'client' || agentType === 'server') {
   var testSetups = createTestsSetups();
 
   debug('Tests setups:');
+  debug('Number of tests: ' + testSetups.length);
   debug(JSON.stringify(testSetups, null, " "));
   debug();
 
-  async.eachSeries(testSetups, function (testSetup, testDone) {
+  var nbTestsStarted = 0;
 
-    var clientSetup = testSetup.client;
-    var serverSetup = testSetup.server;
-
-    if (clientSetup && serverSetup) {
-      debug('Starting new test!');
-
-      debug('client setup:');
-      debug(clientSetup);
-
-      debug('server setup:');
-      debug(serverSetup);
-
-      debug('Success expected:' + testSetup.successExpected);
-
-      var serverExitCode;
-
-      var clientStarted = false;
-      var clientExitCode;
-
-      var serverChild = forkTestProcess('server', serverSetup);
-      assert(serverChild);
-
-      serverChild.on('message', function onServerMsg(msg) {
-        if (msg === 'server_listening') {
-          debug('Starting client!');
-          clientStarted = true;
-
-          var clientChild = forkTestProcess('client', clientSetup);
-          assert(clientChild);
-
-          clientChild.on('exit', function onClientExited(exitCode) {
-            debug('Client exited with code:' + exitCode);
-
-            clientExitCode = exitCode;
-            if (serverExitCode != null) {
-              checkTestExitCode(testSetup, serverExitCode, clientExitCode)
-              return testDone();
-            } else {
-              if (serverChild.connected) {
-                serverChild.send('close');
-              }
-            }
-          });
-
-          clientChild.on('message', function onClientMsg(msg) {
-            if (msg === 'client_done' && serverChild.connected) {
-              serverChild.send('close');
-            }
-          })
-        }
-      });
-
-      serverChild.on('exit', function onServerExited(exitCode) {
-        debug('Server exited with code:' + exitCode);
-
-        serverExitCode = exitCode;
-        if (clientExitCode != null || !clientStarted) {
-          checkTestExitCode(testSetup, serverExitCode, clientExitCode);
-          return testDone();
-        }
-      });
-
+  function runTests(tests, callback) {
+    var nbTests = tests.length;
+    if (nbTests === 0) {
+      return callback();
     }
-  }, function allTestsDone(err, results) {
-    console.log('All tests done!');
-  });
+
+    debug('Starting new batch of tests...');
+
+    var port = common.PORT;
+    async.each(tests, function (test, testDone) {
+      test.port = port++;
+      ++nbTestsStarted;
+      debug('Starting test nb: ' + nbTestsStarted);
+      runTest(test, testDone);
+    }, function testsDone() {
+      return callback();
+    });
+  }
+
+  function runAllTests(allTests, allTestsDone) {
+    if (allTests.length === 0) {
+      return allTestsDone();
+    }
+
+    return runTests(allTests.splice(0, driverOptions.parallelTests),
+                    runAllTests.bind(global, allTests, allTestsDone));
+  }
+
+  runAllTests(testSetups.slice(driverOptions.start, driverOptions.end),
+              function allDone() {
+                console.log('All tests done!');
+              });
 }
