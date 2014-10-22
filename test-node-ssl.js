@@ -241,9 +241,10 @@ function createTestsSetups() {
   });
 
   var testSetups = [];
+  var testId = 0;
   serversSetup.forEach(function (serverSetup) {
     clientsSetup.forEach(function (clientSetup) {
-      var testSetup = {server: serverSetup, client: clientSetup };
+      var testSetup = {server: serverSetup, client: clientSetup, ID: testId++ };
 
       var successExpected = false;
       if (testSetupsCompatible(serverSetup, clientSetup)) {
@@ -560,6 +561,10 @@ function processDriverCmdLineOptions(argv) {
         options.end = argv[++i];
       }
     }
+
+    if (argv[i] === '--list-tests') {
+      options.listTests = true;
+    }
   }
 
   return options;
@@ -598,7 +603,13 @@ if (agentType === 'client' || agentType === 'server') {
    * both client and server exit codes with the expected test result of the test
    * setup. If they match, the test is successful, otherwise it failed.
    */
+
   var testSetups = createTestsSetups();
+
+  if (driverOptions.listTests) {
+    console.log(testSetups);
+    process.exit(0);
+  }
 
   debug('Tests setups:');
   debug('Number of tests: ' + testSetups.length);
@@ -612,17 +623,35 @@ if (agentType === 'client' || agentType === 'server') {
     if (nbTests === 0) {
       return callback();
     }
+    var error;
+    var nbTestsDone = 0;
 
     debug('Starting new batch of tests...');
 
     var port = common.PORT;
     async.each(tests, function (test, testDone) {
       test.port = port++;
+
       ++nbTestsStarted;
       debug('Starting test nb: ' + nbTestsStarted);
-      runTest(test, testDone);
-    }, function testsDone() {
-      return callback();
+
+      runTest(test, function onTestDone(err) {
+        ++nbTestsDone;
+        if (err && error === undefined) {
+          error = new Error('Test with ID ' + test.ID + ' failed: ' + err);
+        }
+
+        if (nbTestsDone === nbTests)
+          return testDone(error);
+        return testDone();
+      });
+
+    }, function testsDone(err, results) {
+      if (err) {
+        assert(false, "At least one test in the most recent batch failed: " + err);
+      }
+
+      return callback(err);
     });
   }
 
