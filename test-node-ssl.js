@@ -4,6 +4,7 @@ var path      = require('path');
 var fork      = require('child_process').fork;
 var assert    = require('assert');
 var constants = require('constants');
+var os        = require('os');
 
 var async     = require('async');
 var debug     = require('debug')('test-node-ssl');
@@ -418,7 +419,7 @@ function secureOptionsToString(secureOptions) {
   return secureOptsString;
 }
 
-function forkTestProcess(processType, testSetup) {
+function forkTestProcess(processType, testSetup, port) {
   var argv = [ processType ];
 
   if (testSetup.secureProtocol) {
@@ -435,7 +436,7 @@ function forkTestProcess(processType, testSetup) {
     argv.push('ciphers:');
   }
 
-  argv.push('port:' + (testSetup.port ? testSetup.port : common.PORT));
+  argv.push('port:' + port);
 
   var forkOptions;
   if (testSetup.cmdLine) {
@@ -457,8 +458,6 @@ function runTest(testSetup, testDone) {
   assert(serverSetup);
 
   debug('Starting new test on port: ' + testSetup.port);
-  clientSetup.port = testSetup.port;
-  serverSetup.port = testSetup.port;
 
   debug('client setup:');
   debug(clientSetup);
@@ -473,7 +472,7 @@ function runTest(testSetup, testDone) {
   var clientStarted = false;
   var clientExitCode;
 
-  var serverChild = forkTestProcess('server', serverSetup);
+  var serverChild = forkTestProcess('server', serverSetup, testSetup.port);
   assert(serverChild);
 
   serverChild.on('message', function onServerMsg(msg) {
@@ -481,7 +480,7 @@ function runTest(testSetup, testDone) {
       debug('Starting client!');
       clientStarted = true;
 
-      var clientChild = forkTestProcess('client', clientSetup);
+      var clientChild = forkTestProcess('client', clientSetup, testSetup.port);
       assert(clientChild);
 
       clientChild.on('exit', function onClientExited(exitCode) {
@@ -524,7 +523,8 @@ function runTest(testSetup, testDone) {
 }
 
 function usage() {
-  console.log('Usage: test-node-ssl [-j N]');
+  console.log('Usage: test-node-ssl [-j N] [--list-tests] [-s startIndex] ' +
+              '[-e endIndex] [-o outputFile]');
   process.exit(1);
 }
 
@@ -565,9 +565,28 @@ function processDriverCmdLineOptions(argv) {
     if (argv[i] === '--list-tests') {
       options.listTests = true;
     }
+
+    if (argv[i] === '-o') {
+      var outputFile = argv[i + 1];
+      if (!outputFile) {
+        usage();
+      } else {
+        options.outputFile = argv[++i];
+      }
+    }
   }
 
   return options;
+}
+
+function outputTestResult(test, err, output) {
+  output.write(os.EOL);
+  output.write('Test:' + os.EOL);
+  output.write(JSON.stringify(test, null, " "));
+  output.write(os.EOL);
+  output.write('Result:');
+  output.write(err ? 'failure' : 'success');
+  output.write(os.EOL);
 }
 
 var agentType = process.argv[2];
@@ -611,6 +630,15 @@ if (agentType === 'client' || agentType === 'server') {
     process.exit(0);
   }
 
+  var testOutput = process.stdout;
+  if (driverOptions.outputFile) {
+    testOutput = fs.createWriteStream(driverOptions.outputFile)
+      .on('error', function onError(err) {
+        console.error(err);
+        process.exit(1);
+      });
+  }
+
   debug('Tests setups:');
   debug('Number of tests: ' + testSetups.length);
   debug(JSON.stringify(testSetups, null, " "));
@@ -640,6 +668,8 @@ if (agentType === 'client' || agentType === 'server') {
         if (err && error === undefined) {
           error = new Error('Test with ID ' + test.ID + ' failed: ' + err);
         }
+
+        outputTestResult(test, err, testOutput);
 
         if (nbTestsDone === nbTests)
           return testDone(error);
