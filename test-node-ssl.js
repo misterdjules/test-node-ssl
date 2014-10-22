@@ -137,6 +137,10 @@ function secureProtocolCompatibleWithSecureOptions(secureProtocol, secureOptions
 }
 
 function testSetupsCompatible(serverSetup, clientSetup) {
+  debug('Determing test result for:');
+  debug(serverSetup);
+  debug(clientSetup);
+
   if (!secureProtocolsCompatible(serverSetup.secureProtocol,
                                  clientSetup.secureProtocol)) {
     debug('secureProtocols not compatible! server secureProtocol: ' +
@@ -147,17 +151,25 @@ function testSetupsCompatible(serverSetup, clientSetup) {
 
   if (!secureProtocolCompatibleWithSecureOptions(serverSetup.secureProtocol,
                                                  clientSetup.secureOptions,
-                                                 clientSetup.cmdLineOption) ||
+                                                 clientSetup.cmdLine) ||
       !secureProtocolCompatibleWithSecureOptions(clientSetup.secureProtocol,
                                                  serverSetup.secureOptions,
-                                                 serverSetup.cmdLineOption)) {
+                                                 serverSetup.cmdLine)) {
     debug('Secure protocol not compatible with secure options!');
     return false;
   }
 
-  if ((isSsl2Protocol(serverSetup.secureProtocol) || isSsl2Protocol(clientSetup.secureProtocol)) &&
-      (clientSetup.ciphers !== SSL2_COMPATIBLE_CIPHERS || serverSetup.ciphers !== SSL2_COMPATIBLE_CIPHERS)) {
-    return false;
+  if (isSsl2Protocol(serverSetup.secureProtocol) ||
+      isSsl2Protocol(clientSetup.secureProtocol)) {
+
+      if (serverSetup.ciphers !== SSL2_COMPATIBLE_CIPHERS) {
+        return false;
+      }
+
+      if ((!isSsl2Protocol(serverSetup.secureProtocol) || !isSsl2Protocol(clientSetup.secureProtocol)) &&
+        (clientSetup.ciphers !== SSL2_COMPATIBLE_CIPHERS || serverSetup.ciphers !== SSL2_COMPATIBLE_CIPHERS)) {
+        return false;
+      }
   }
 
   return true;
@@ -373,14 +385,18 @@ function processTestCmdLineOptions(argv){
 
 function checkTestExitCode(testSetup, serverExitCode, clientExitCode) {
   if (testSetup.successExpected) {
-    assert.equal(serverExitCode, 0);
-    assert.equal(clientExitCode, 0);
-    debug('Test succeeded as expected!');
+    if (serverExitCode === 0 && clientExitCode === 0) {
+      debug('Test succeeded as expected!');
+      return true;
+    }
+  } else {
+    if (serverExitCode !== 0 || clientExitCode !== 0) {
+      debug('Test failed as expected!');
+      return true;
+    }
   }
-  else {
-    assert.ok(serverExitCode !== 0 || clientExitCode !== 0);
-    debug('Test failed as expected!');
-  }
+
+  return false;
 }
 
 function secureOptionsToString(secureOptions) {
@@ -436,68 +452,74 @@ function runTest(testSetup, testDone) {
   var clientSetup = testSetup.client;
   var serverSetup = testSetup.server;
 
-  if (clientSetup && serverSetup) {
-    debug('Starting new test on port: ' + testSetup.port);
-    clientSetup.port = testSetup.port;
-    serverSetup.port = testSetup.port;
+  assert(clientSetup);
+  assert(serverSetup);
 
-    debug('client setup:');
-    debug(clientSetup);
+  debug('Starting new test on port: ' + testSetup.port);
+  clientSetup.port = testSetup.port;
+  serverSetup.port = testSetup.port;
 
-    debug('server setup:');
-    debug(serverSetup);
+  debug('client setup:');
+  debug(clientSetup);
 
-    debug('Success expected:' + testSetup.successExpected);
+  debug('server setup:');
+  debug(serverSetup);
 
-    var serverExitCode;
+  debug('Success expected:' + testSetup.successExpected);
 
-    var clientStarted = false;
-    var clientExitCode;
+  var serverExitCode;
 
-    var serverChild = forkTestProcess('server', serverSetup);
-    assert(serverChild);
+  var clientStarted = false;
+  var clientExitCode;
 
-    serverChild.on('message', function onServerMsg(msg) {
-      if (msg === 'server_listening') {
-        debug('Starting client!');
-        clientStarted = true;
+  var serverChild = forkTestProcess('server', serverSetup);
+  assert(serverChild);
 
-        var clientChild = forkTestProcess('client', clientSetup);
-        assert(clientChild);
+  serverChild.on('message', function onServerMsg(msg) {
+    if (msg === 'server_listening') {
+      debug('Starting client!');
+      clientStarted = true;
 
-        clientChild.on('exit', function onClientExited(exitCode) {
-          debug('Client exited with code:' + exitCode);
+      var clientChild = forkTestProcess('client', clientSetup);
+      assert(clientChild);
 
-          clientExitCode = exitCode;
-          if (serverExitCode != null) {
-            checkTestExitCode(testSetup, serverExitCode, clientExitCode)
-            return testDone();
-          } else {
-            if (serverChild.connected) {
-              serverChild.send('close');
-            }
-          }
-        });
+      clientChild.on('exit', function onClientExited(exitCode) {
+        debug('Client exited with code:' + exitCode);
 
-        clientChild.on('message', function onClientMsg(msg) {
-          if (msg === 'client_done' && serverChild.connected) {
+        clientExitCode = exitCode;
+        if (serverExitCode != null) {
+          var err;
+          if (!checkTestExitCode(testSetup, serverExitCode, clientExitCode))
+            err = new Error("Test failed!");
+
+          return testDone(err);
+        } else {
+          if (serverChild.connected) {
             serverChild.send('close');
           }
-        })
-      }
-    });
+        }
+      });
 
-    serverChild.on('exit', function onServerExited(exitCode) {
-      debug('Server exited with code:' + exitCode);
+      clientChild.on('message', function onClientMsg(msg) {
+        if (msg === 'client_done' && serverChild.connected) {
+          serverChild.send('close');
+        }
+      })
+    }
+  });
 
-      serverExitCode = exitCode;
-      if (clientExitCode != null || !clientStarted) {
-        checkTestExitCode(testSetup, serverExitCode, clientExitCode);
-        return testDone();
-      }
-    });
+  serverChild.on('exit', function onServerExited(exitCode) {
+    debug('Server exited with code:' + exitCode);
 
-  }
+    serverExitCode = exitCode;
+    if (clientExitCode != null || !clientStarted) {
+      var err;
+      if (!checkTestExitCode(testSetup, serverExitCode, clientExitCode))
+        err = new Error("Test failed!");
+
+      return testDone(err);
+    }
+  });
 }
 
 function usage() {
@@ -530,7 +552,7 @@ function processDriverCmdLineOptions(argv) {
       }
     }
 
-    if (argv[i] === 'e') {
+    if (argv[i] === '-e') {
       var end = +argv[i + 1];
       if (!end) {
         usage();
@@ -564,6 +586,8 @@ if (agentType === 'client' || agentType === 'server') {
   }
 } else {
   var driverOptions = processDriverCmdLineOptions(process.argv);
+  debug('Tests driver options:');
+  debug(driverOptions);
   /*
    * This is the tests driver process.
    *
@@ -612,7 +636,7 @@ if (agentType === 'client' || agentType === 'server') {
   }
 
   runAllTests(testSetups.slice(driverOptions.start, driverOptions.end),
-              function allDone() {
+              function allDone(err) {
                 console.log('All tests done!');
               });
 }
